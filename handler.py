@@ -9,10 +9,6 @@ import traceback
 import urllib.request
 from pathlib import Path
 
-import torch
-import torchaudio
-import transformers
-from huggingface_hub import snapshot_download
 import runpod
 
 # Ensure stdout is unbuffered for immediate console output
@@ -24,47 +20,48 @@ MODEL_DIR = VOLUME_PATH / "models" / "MOSS-TTS-v1.5"
 MODEL_REPO = os.getenv("MODEL_REPO", "OpenMOSS-Team/MOSS-TTS-v1.5")
 HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
+# Lazy global model singletons
+DEVICE = None
+DTYPE = None
+ATTN_IMPL = None
+processor = None
+model = None
 
-# =====================================================================
-# STARTUP DEBUG DIAGNOSTICS BANNER (Logged to Console)
-# =====================================================================
-print("=" * 75, flush=True)
-print("=== RUNPOD SERVERLESS WORKER DIAGNOSTIC LOG ===", flush=True)
-print(f"[DEBUG] Python Version:        {sys.version.split()[0]}", flush=True)
-print(f"[DEBUG] PyTorch Version:       {torch.__version__}", flush=True)
-print(f"[DEBUG] PyTorch CUDA Version:  {torch.version.cuda}", flush=True)
-print(f"[DEBUG] CUDA Available:        {torch.cuda.is_available()}", flush=True)
+def run_diagnostics():
+    """Diagnostic logger executed at worker startup."""
+    import torch
+    import torchaudio
+    import transformers
 
-if torch.cuda.is_available():
-    props = torch.cuda.get_device_properties(0)
-    vram_gb = props.total_memory / (1024 ** 3)
-    print(f"[DEBUG] GPU Device Name:       {props.name}", flush=True)
-    print(f"[DEBUG] GPU Total VRAM:        {vram_gb:.2f} GB", flush=True)
-    print(f"[DEBUG] GPU Compute Cap:       {props.major}.{props.minor}", flush=True)
-else:
-    print("[WARNING] CUDA NOT AVAILABLE! Running in CPU Mode.", flush=True)
+    print("=" * 75, flush=True)
+    print("=== RUNPOD SERVERLESS WORKER DIAGNOSTIC LOG ===", flush=True)
+    print(f"[DEBUG] Python Version:        {sys.version.split()[0]}", flush=True)
+    print(f"[DEBUG] PyTorch Version:       {torch.__version__}", flush=True)
+    print(f"[DEBUG] PyTorch CUDA Version:  {torch.version.cuda}", flush=True)
+    print(f"[DEBUG] CUDA Available:        {torch.cuda.is_available()}", flush=True)
 
-flash_attn_spec = importlib.util.find_spec("flash_attn")
-print(f"[DEBUG] FlashAttention Specs:  {'Found' if flash_attn_spec else 'Not Installed'}", flush=True)
-print(f"[DEBUG] Transformers Version:  {transformers.__version__}", flush=True)
-print(f"[DEBUG] Torchaudio Version:     {torchaudio.__version__}", flush=True)
-print(f"[DEBUG] RunPod SDK Version:    {getattr(runpod, '__version__', 'Installed')}", flush=True)
-print(f"[DEBUG] Network Volume Path:   {VOLUME_PATH} (Exists: {VOLUME_PATH.exists()})", flush=True)
-print(f"[DEBUG] HF Token Present:      {bool(HF_TOKEN)}", flush=True)
-print("=" * 75, flush=True)
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        vram_gb = props.total_memory / (1024 ** 3)
+        print(f"[DEBUG] GPU Device Name:       {props.name}", flush=True)
+        print(f"[DEBUG] GPU Total VRAM:        {vram_gb:.2f} GB", flush=True)
+        print(f"[DEBUG] GPU Compute Cap:       {props.major}.{props.minor}", flush=True)
+    else:
+        print("[WARNING] CUDA NOT AVAILABLE! Running in CPU Mode.", flush=True)
 
-# Disable cuDNN SDPA backend due to MOSS-TTS compatibility
-if DEVICE == "cuda":
-    torch.backends.cuda.enable_cudnn_sdp(False)
-    torch.backends.cuda.enable_flash_sdp(True)
-    torch.backends.cuda.enable_mem_efficient_sdp(True)
-    torch.backends.cuda.enable_math_sdp(True)
+    flash_attn_spec = importlib.util.find_spec("flash_attn")
+    print(f"[DEBUG] FlashAttention Specs:  {'Found' if flash_attn_spec else 'Not Installed'}", flush=True)
+    print(f"[DEBUG] Transformers Version:  {transformers.__version__}", flush=True)
+    print(f"[DEBUG] Torchaudio Version:     {torchaudio.__version__}", flush=True)
+    print(f"[DEBUG] RunPod SDK Version:    {getattr(runpod, '__version__', 'Installed')}", flush=True)
+    print(f"[DEBUG] Network Volume Path:   {VOLUME_PATH} (Exists: {VOLUME_PATH.exists()})", flush=True)
+    print(f"[DEBUG] HF Token Present:      {bool(HF_TOKEN)}", flush=True)
+    print("=" * 75, flush=True)
 
 def ensure_flash_attention():
     """Ensure FlashAttention-2 is installed from binary wheel if missing."""
-    if DEVICE == "cuda" and importlib.util.find_spec("flash_attn") is None:
+    import torch
+    if torch.cuda.is_available() and importlib.util.find_spec("flash_attn") is None:
         print(f"[FIRST-TIME BOOTSTRAP] Installing FlashAttention-2 wheel from {FLASH_ATTN_WHEEL}...", flush=True)
         try:
             subprocess.run(
@@ -77,6 +74,7 @@ def ensure_flash_attention():
 
 def ensure_model_provisioned():
     """First-Time Start Routine: Auto-downloads models using accelerated hf tool."""
+    from huggingface_hub import snapshot_download
     ensure_flash_attention()
     if not MODEL_DIR.exists() or not any(MODEL_DIR.iterdir()):
         print(f"[FIRST-TIME START] Model directory {MODEL_DIR} not found.", flush=True)
@@ -107,40 +105,59 @@ def ensure_model_provisioned():
     else:
         print(f"[SUBSEQUENT START] Using existing pre-cached model weights from {MODEL_DIR}", flush=True)
 
-def resolve_attn_implementation() -> str:
+def resolve_attn_implementation(device: str, dtype) -> str:
+    import torch
     if (
-        DEVICE == "cuda"
+        device == "cuda"
         and importlib.util.find_spec("flash_attn") is not None
-        and DTYPE in {torch.float16, torch.bfloat16}
+        and dtype in {torch.float16, torch.bfloat16}
     ):
         major, _ = torch.cuda.get_device_capability()
         if major >= 8:
             return "flash_attention_2"
-    return "sdpa" if DEVICE == "cuda" else "eager"
+    return "sdpa" if device == "cuda" else "eager"
 
-# 1. Run First-Time Bootstrapper
-ensure_model_provisioned()
+def load_model():
+    """Loads MOSS-TTS model and processor lazily into global singletons."""
+    global DEVICE, DTYPE, ATTN_IMPL, processor, model
+    if model is not None and processor is not None:
+        return
 
-print(f"[INIT] Loading MOSS-TTS-v1.5 processor and model on {DEVICE}...", flush=True)
-ATTN_IMPL = resolve_attn_implementation()
-print(f"[INIT] Attention Implementation Selected: {ATTN_IMPL}", flush=True)
+    import torch
+    from transformers import AutoModel, AutoProcessor
 
-from transformers import AutoModel, AutoProcessor
+    run_diagnostics()
 
-processor = AutoProcessor.from_pretrained(
-    str(MODEL_DIR),
-    trust_remote_code=True,
-)
-processor.audio_tokenizer = processor.audio_tokenizer.to(DEVICE)
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    DTYPE = torch.bfloat16 if DEVICE == "cuda" else torch.float32
 
-model = AutoModel.from_pretrained(
-    str(MODEL_DIR),
-    trust_remote_code=True,
-    attn_implementation=ATTN_IMPL,
-    torch_dtype=DTYPE,
-).to(DEVICE)
-model.eval()
-print("[INIT] Model loaded successfully and worker is warm!", flush=True)
+    # Disable cuDNN SDPA backend due to MOSS-TTS compatibility
+    if DEVICE == "cuda":
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+
+    ensure_model_provisioned()
+
+    print(f"[INIT] Loading MOSS-TTS-v1.5 processor and model on {DEVICE}...", flush=True)
+    ATTN_IMPL = resolve_attn_implementation(DEVICE, DTYPE)
+    print(f"[INIT] Attention Implementation Selected: {ATTN_IMPL}", flush=True)
+
+    processor = AutoProcessor.from_pretrained(
+        str(MODEL_DIR),
+        trust_remote_code=True,
+    )
+    processor.audio_tokenizer = processor.audio_tokenizer.to(DEVICE)
+
+    model = AutoModel.from_pretrained(
+        str(MODEL_DIR),
+        trust_remote_code=True,
+        attn_implementation=ATTN_IMPL,
+        torch_dtype=DTYPE,
+    ).to(DEVICE)
+    model.eval()
+    print("[INIT] Model loaded successfully and worker is warm!", flush=True)
 
 def detect_language(text: str) -> str | None:
     if any("一" <= char <= "鿿" for char in text):
@@ -171,7 +188,8 @@ def process_reference_audio(job_input: dict) -> tuple[str | None, bool]:
 
     return None, False
 
-def audio_tensor_to_base64(audio_tensor: torch.Tensor, sample_rate: int) -> str:
+def audio_tensor_to_base64(audio_tensor, sample_rate: int) -> str:
+    import torchaudio
     buffer = io.BytesIO()
     torchaudio.save(
         buffer,
@@ -184,6 +202,11 @@ def audio_tensor_to_base64(audio_tensor: torch.Tensor, sample_rate: int) -> str:
 
 def handler(job: dict):
     """RunPod Serverless Handler Function supporting Streaming, Non-Streaming, Health Ping, and VRAM Cleanup."""
+    import torch
+    import torchaudio
+
+    load_model()
+
     ref_file = None
     is_temp = False
     job_id = job.get("id", "unknown")
@@ -287,7 +310,8 @@ def handler(job: dict):
     finally:
         if is_temp and ref_file and os.path.exists(ref_file):
             os.remove(ref_file)
-        if DEVICE == "cuda":
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-runpod.serverless.start({"handler": handler})
+if __name__ == "__main__":
+    runpod.serverless.start({"handler": handler})
