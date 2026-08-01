@@ -38,7 +38,7 @@ RUN pip install https://github.com/Dao-AILab/flash-attention/releases/download/v
 WORKDIR /app
 RUN git clone https://github.com/OpenMOSS/MOSS-TTS.git . && \
     pip install --extra-index-url https://download.pytorch.org/whl/cu128 -e . && \
-    pip install runpod soundfile scipy "huggingface_hub[cli]" hf_transfer
+    pip install runpod soundfile scipy "huggingface_hub[cli]" hf_transfer "transformers>=4.48.0"
 
 # Copy worker handler script
 COPY handler.py /app/handler.py
