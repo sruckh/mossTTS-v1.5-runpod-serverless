@@ -8,6 +8,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/runpod-volume/huggingface \
     RUNPOD_VOLUME_PATH=/runpod-volume \
     MODEL_REPO=OpenMOSS-Team/MOSS-TTS-v1.5 \
+    RUNPOD_SKIP_GPU_CHECK=true \
+    RUNPOD_SKIP_AUTO_SYSTEM_CHECKS=true \
     PIP_NO_CACHE_DIR=1
 
 # Install system dependencies & Python 3.12 (native Ubuntu 24.04)
