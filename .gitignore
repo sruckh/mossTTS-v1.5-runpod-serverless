@@ -1,5 +1,7 @@
 # Claude / Agent Scratch Directories
+.claude/
 .goals/
+.mcp.json
 .outline/
 .serena/
 AGENTS.md
