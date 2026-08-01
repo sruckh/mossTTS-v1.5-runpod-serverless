@@ -233,6 +233,32 @@ Configure these environment variables in the **RunPod Console → Serverless Tem
 | `HF_HUB_ENABLE_HF_TRANSFER` | `1` | Enables Rust-accelerated `hf_transfer` high-speed downloads. |
 | `HF_XET_HIGH_PERFORMANCE` | `1` | Enables multi-part S3 range gets in Hugging Face Hub client. |
 | `PYTHONUNBUFFERED` | `1` | Forces unbuffered stdout/stderr real-time console logging. |
+| `RUNPOD_SKIP_GPU_CHECK` | `true` | **Required.** Skips the RunPod SDK's native GPU memory allocation fitness test, which runs *after* the model loads into VRAM and false-positives CUDA OOM on otherwise-healthy workers. |
+| `RUNPOD_SKIP_AUTO_SYSTEM_CHECKS` | `true` | **Required.** Skips the SDK's auto-registered system fitness checks (memory, disk, network, CUDA init, GPU benchmark) — the CUDA init check also OOMs post-model-load and kills workers before any job runs. |
+
+> **Why the two `RUNPOD_SKIP_*` flags are mandatory:** the SDK's startup fitness checks execute *after* `handler.py` loads the model onto the GPU. Their own probe allocations then fail with `CUDA error: out of memory`, marking the worker UNHEALTHY and cancelling queued jobs — even though the model itself loaded fine. See [runpod-python worker fitness checks](https://github.com/runpod/runpod-python/blob/main/docs/serverless/worker_fitness_checks.md).
+
+---
+
+## 🖥️ GPU Requirements
+
+| Tier | GPU Pools | Status |
+| :--- | :--- | :--- |
+| **Minimum (recommended)** | `ADA_48_PRO`, `AMPERE_48` (L40S / A40, 48 GB) | ✅ Verified working |
+| **Headroom** | `AMPERE_80` (A100 80 GB) | ✅ Works |
+| **Fallback** | `ADA_32_PRO` (32 GB) | ⚠️ Works, less headroom |
+| **Too small** | `ADA_24`, `AMPERE_24` (L4 / RTX 4090, 24 GB) | ❌ Model loads but inference OOMs |
+
+The model *loads* on 24 GB cards but generation needs several GB of activation/workspace headroom — jobs fail with `CUDA error: out of memory`. Configure pools under **Endpoint → GPU Configuration**.
+
+---
+
+## 🚢 Deployment Notes (GitHub Integration)
+
+- **Rebuilds trigger on releases, not pushes.** RunPod's GitHub integration only builds a new image when you create a **GitHub release** — pushing commits to `main` alone changes nothing on the endpoint. Cut a release (e.g. `gh release create v1.5.1`) to deploy code changes.
+- **Handler detection**: the repo scanner requires a top-level `runpod.serverless.start({...})` call in `handler.py` (not wrapped in an `if __name__ == "__main__":` block).
+- **Dockerfile is authoritative for the image**: `requirements.txt` is a reference for local dev — the Dockerfile installs deps explicitly, so add new packages in **both** places.
+- **Build limits**: `docker build` step capped at 30 min; total build window 160 min; image max 80 GB.
 
 ---
 
