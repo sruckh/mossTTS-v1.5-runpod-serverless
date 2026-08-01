@@ -1,6 +1,6 @@
 <div align="center">
 
-![MOSS-TTS RunPod Serverless Hero Banner](assets/readme/hero-banner.svg)
+<img src="./assets/readme/hero-banner.svg" width="100%" alt="MOSS-TTS RunPod Serverless Hero Banner">
 
 # MOSS-TTS-v1.5 RunPod Serverless API Engine
 
