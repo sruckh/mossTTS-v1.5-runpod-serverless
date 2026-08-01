@@ -1,0 +1,28 @@
+# Claude / Agent Scratch & Memory Directories
+.goals/
+.outline/
+.serena/
+AGENTS.md
+CLAUDE.md
+
+# Git & Docker
+.git/
+.gitignore
+.dockerignore
+README.md
+
+# Python & Environment
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.env
+.env.example
+
+# Local Audio & Test Outputs
+inference_root/
+*.wav
+*.mp3
+*.m4a
