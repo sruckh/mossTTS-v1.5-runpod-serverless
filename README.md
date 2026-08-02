@@ -21,6 +21,7 @@
 - **Dual Execution Modes**: Native support for both **Streaming** (`stream: true` generator yields) and **Non-Streaming** (`stream: false` full Base64 audio payload).
 - **Sub-5-Second Cold Starts**: Automated First-Time Bootstrapper downloads weights once to persistent RunPod Network Volume NVMe storage (`/runpod-volume`). Subsequent worker spawns skip downloads and initialize in ~3–5s.
 - **Zero-Shot Voice Cloning**: Accepts reference audio via direct **Base64 upload** (`reference_audio_base64`) OR remote **Audio URL** (`reference_url`).
+- **Word-Level Timings**: Non-streaming responses optionally carry `word_timings` — transcript-locked forced alignment (MMS_FA, ~50 Hz emission) against the model-normalized text, with **zero extra inference models required by the caller** and graceful omission on any failure. See Response Schema §3A.
 - **Language Detection & Selection**: Explicit language tagging (`Chinese`, `English`, `French`) with automatic prompt script detection when omitted.
 - **FlashAttention-2 Acceleration**: Pre-compiled binary wheel matching PyTorch 2.8 + CUDA 12 ABI (`flash_attn-2.8.3`) doubling token generation throughput on RTX 4090/A100/A10G GPUs.
 - **Robust VRAM & Resource Management**: Unbuffered real-time logging (`PYTHONUNBUFFERED=1`), diagnostic startup header, zero VRAM leakage (`torch.cuda.empty_cache()`), and lightweight health check ping endpoint.
@@ -94,11 +95,28 @@ interface RunPodTTSInput {
     "audio_base64": "UklGRi...",
     "format": "wav",
     "sample_rate": 24000,
-    "detected_language": "English"
+    "detected_language": "English",
+    "word_timings": {
+      "frame_rate": 50.0,
+      "source": "mms_fa_forced_alignment",
+      "words": [
+        { "w": "Hello,",  "start": 0.02, "end": 0.41 },
+        { "w": "welcome", "start": 0.45, "end": 0.83 },
+        { "w": "to",      "start": 0.83, "end": 0.94 }
+      ]
+    }
   },
   "status": "COMPLETED"
 }
 ```
+
+**`word_timings` (optional, additive):** word-level timing produced by forced alignment of the synthesized waveform against the model-normalized transcript (`torchaudio.pipelines.MMS_FA` — transcript-locked, no ASR guesses). Rules for consumers:
+
+- **The key may be absent.** Absent means "fall back" (e.g. to interpolating word positions across the audio duration); present means "trust me". The key is omitted entirely — never empty, never partial — when alignment fails or the text has no alignable words. Alignment failure never fails the job.
+- **`words[].w` is the rendered string.** Render the spoken line from this array, not from your own copy of the input text: the model normalizes text before synthesis (numbers expanded, punctuation reflowed), so `w` reflects what was actually spoken.
+- **`start`/`end`** are seconds from the start of the returned WAV, floats, monotonically non-decreasing, always `start < end`.
+- **`frame_rate`** is the alignment emission rate (≈50 Hz at 16 kHz); informational only.
+- **`source`** is currently `"mms_fa_forced_alignment"`. Chinese text is romanized via pinyin for alignment and returned one character per word.
 
 #### B. Streaming Output Chunks (`stream: true` via `/stream/{JOB_ID}`)
 ```json
